@@ -1,13 +1,13 @@
-;;; vue-ts-mode.el --- Major mode for editing Vue templates  -*- lexical-binding: t; -*-
+;;; vue-ts-mode.el --- Major mode for editing Vue templates -*- lexical-binding: t; -*-
 
 ;; Copyright (C) 2023 8uff3r
 
 ;; Author: 8uff3r <8uff3r@gmail.com>
-;; Homepage: https://github.com/8uff3r/vue-ts-mode
+;; Homepage: https://github.com/KarimAziev/vue-ts-mode
 ;; Version: 1.0.0
 ;; Package-Requires: ((emacs "30"))
 ;; Keywords: languages
-
+;; URL: https://github.com/KarimAziev/vue-ts-mode
 
 ;; This program is free software: you can redistribute it and/or modify
 ;; it under the terms of the GNU General Public License as published by
@@ -29,7 +29,7 @@
 ;; ikatyang's tree-sitter grammar for Vue.
 
 ;; More info:
-;; README: https://github.com/8uff3r/vue-ts-mode
+;; README: https://github.com/KarimAziev/vue-ts-mode
 ;; tree-sitter-vue: https://github.com/ikatyang/tree-sitter-vue
 ;; Vue: https://vuejs.org//
 
@@ -226,12 +226,25 @@ Return nil if there is no name or if NODE is not a defun node."
 (defun vue-ts-mode--comment-for-language-at-point ()
   "Return the comment syntax for language at point."
   (let ((lang (vue-ts-mode--treesit-language-at-point (point))))
-    (cond
-     ((equal lang 'vue) `(:start "<!-- " :start-skip "<!--[ \t]*"   :end " -->" :end-skip "[ \t]*--[ \t\n]*>"))
-     ((equal lang 'typescript) `(:start "// " :start-skip "\\(?://+\\|/\\*+\\)\\s-*" :end "" :end-skip "\\s-*\\(\\s>\\|\\*+/\\)")) 
-     ((equal lang 'css) `(:start "/*" :start-skip "/\\*+[ \t]*" :end "*/" :end-skip "[ \t]*\\*+/")))))
+    (cond ((equal lang 'vue) `(:start "<!-- "
+                               :start-skip "<!--[ \t]*"
+                               :end " -->"
+                               :end-skip "[ \t]*--[ \t\n]*>"))
+          ((equal lang 'typescript) `(:start "// "
+                                      :start-skip "\\(?://+\\|/\\*+\\)\\s-*"
+                                      :end ""
+                                      :end-skip "\\s-*\\(\\s>\\|\\*+/\\)"))
+          ((equal lang 'css) `(:start "/*"
+                               :start-skip "/\\*+[ \t]*"
+                               :end "*/"
+                               :end-skip "[ \t]*\\*+/")))))
 
 (defun vue-ts-mode--advice-for-comment-fns (fn &rest args)
+  "Apply FN with comment syntax for the language at point.
+
+Argument FN is the function to call with comment syntax bindings.
+
+Remaining arguments ARGS are the arguments passed to FN."
   (if (equal major-mode 'vue-ts-mode)
       (let* ((comment-vars (vue-ts-mode--comment-for-language-at-point))
              (comment-start (plist-get comment-vars :start))
