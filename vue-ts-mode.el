@@ -1,13 +1,15 @@
 ;;; vue-ts-mode.el --- Major mode for editing Vue templates -*- lexical-binding: t; -*-
 
 ;; Copyright (C) 2023 8uff3r
+;; Copyright (C) 2026 Karim Aziiev <karim.aziiev@gmail.com>
 
 ;; Author: 8uff3r <8uff3r@gmail.com>
 ;; Homepage: https://github.com/KarimAziev/vue-ts-mode
 ;; Version: 1.0.0
-;; Package-Requires: ((emacs "30"))
+;; Package-Requires: ((emacs "30") (cl-lib "6.0.6") (transient "0.13.4"))
 ;; Keywords: languages
 ;; URL: https://github.com/KarimAziev/vue-ts-mode
+;; SPDX-License-Identifier: GPL-3.0-or-later
 
 ;; This program is free software: you can redistribute it and/or modify
 ;; it under the terms of the GNU General Public License as published by
@@ -35,10 +37,12 @@
 
 ;;; Code:
 
+(require 'cl-lib)
+(require 'seq)
 (require 'treesit)
 (require 'typescript-ts-mode)
 (require 'css-mode)
-
+(require 'transient)
 
 (defgroup vue ()
   "Major mode for editing Vue templates."
@@ -51,6 +55,30 @@
   :type 'integer
   :group 'vue
   :package-version '(vue-ts-mode . "1.0.0"))
+
+
+
+(eval-and-compile
+  (defun vue-ts-mode--expand (init-fn)
+    "If INIT-FN is a non-quoted symbol, add a sharp quote.
+Otherwise, return it as is."
+    (setq init-fn (macroexpand init-fn))
+    (if (symbolp init-fn)
+        `(#',init-fn)
+      `(,init-fn))))
+
+(defmacro vue-ts-mode--rpartial (fn &rest args)
+  "Return a partial application of a function FN to right-hand ARGS.
+
+ARGS is a list of the last N arguments to pass to FN. The result is a new
+function which does the same as FN, except that the last N arguments are fixed
+at the values with which this function was called."
+  (declare (side-effect-free t))
+  (let ((pre-args (make-symbol "pre-args")))
+    `(lambda (&rest ,pre-args)
+       ,(car (list
+              `(apply ,@(vue-ts-mode--expand fn)
+                (append ,pre-args (list ,@args))))))))
 
 (defvar vue-ts-mode--indent-rules
   `((vue
@@ -66,8 +94,9 @@
      ((parent-is "start_tag") parent-bol vue-ts-mode-indent-offset)
      ((parent-is "self_closing_tag") parent-bol vue-ts-mode-indent-offset))
     (css . ,(append (alist-get 'css css--treesit-indent-rules)
-                    '(((parent-is "stylesheet") parent-bol 0))))
-    (typescript . ,(alist-get 'typescript (typescript-ts-mode--indent-rules 'typescript))))
+             '(((parent-is "stylesheet") parent-bol 0))))
+    (typescript . ,(alist-get 'typescript (typescript-ts-mode--indent-rules
+                                           'typescript))))
   "Tree-sitter indentation rules for `vue-ts-mode'.")
 
 ;; font-lock rules
@@ -350,6 +379,533 @@ Remaining arguments ARGS are the arguments passed to FN."
         (apply fn args))
     (apply fn args)))
 
+;;; Element navigation
+
+(defconst vue-ts-mode--element-node-types
+  '("element" "template_element" "script_element" "style_element")
+  "Tree-sitter node types that represent Vue elements.")
+
+(defconst vue-ts-mode--element-node-type-regexp
+  (regexp-opt vue-ts-mode--element-node-types))
+
+(defconst vue-ts-mode--element-content-node-types
+  '("text" "interpolation" "raw_text")
+  "Tree-sitter node types that are useful child navigation targets.")
+
+(defconst vue-ts-mode--tag-node-types
+  '("start_tag" "self_closing_tag")
+  "Tree-sitter node types that can hold Vue attributes.")
+
+(defconst vue-ts-mode--attribute-node-types
+  '("attribute" "directive_attribute")
+  "Tree-sitter node types that represent Vue attributes.")
+
+(defconst vue-ts-mode--attribute-value-node-types
+  '("attribute_value" "quoted_attribute_value")
+  "Tree-sitter node types that represent Vue attribute values.")
+
+(defun vue-ts-mode--treesit-node-type-p (node type)
+  "Return non-nil if NODE's type is TYPE.
+TYPE may be a string, a list of strings, or a regexp."
+  (when node
+    (let ((node-type (treesit-node-type node)))
+      (cond
+       ((stringp type) (string-match-p type node-type))
+       ((listp type) (member node-type type))))))
+
+(defun vue-ts-mode--element-node-p (node)
+  "Return non-nil if NODE is a Vue element node."
+  (vue-ts-mode--treesit-node-type-p node vue-ts-mode--element-node-types))
+
+(defun vue-ts-mode--tag-node-p (node)
+  "Return non-nil if NODE is a Vue start or self-closing tag node."
+  (vue-ts-mode--treesit-node-type-p node vue-ts-mode--tag-node-types))
+
+(defun vue-ts-mode--attribute-node-p (node)
+  "Return non-nil if NODE is a Vue attribute node."
+  (vue-ts-mode--treesit-node-type-p node vue-ts-mode--attribute-node-types))
+
+(defun vue-ts-mode--attribute-value-node-p (node)
+  "Return non-nil if NODE is a Vue attribute value node."
+  (vue-ts-mode--treesit-node-type-p
+   node vue-ts-mode--attribute-value-node-types))
+
+(defun vue-ts-mode--treesit-parent-until (node predicate)
+  "Return NODE or its nearest parent satisfying PREDICATE."
+  (while (and node (not (funcall predicate node)))
+    (setq node (treesit-node-parent node)))
+  node)
+
+(defun vue-ts-mode--node-at-pos (&optional pos)
+  "Return the Vue node at POS.
+When POS is nil, use point.  If POS is at the end of a node, also
+try the preceding character."
+  (let ((pos (or pos (point))))
+    (or (treesit-node-at pos 'vue)
+        (and (> pos (point-min))
+             (treesit-node-at (1- pos) 'vue)))))
+
+(defun vue-ts-mode--element-at-pos (&optional pos)
+  "Return the nearest element node at POS.
+When POS is nil, use point."
+  (let ((node (vue-ts-mode--node-at-pos pos)))
+    (vue-ts-mode--treesit-parent-until node #'vue-ts-mode--element-node-p)))
+
+(defun vue-ts-mode--element-parent (node)
+  "Return NODE's nearest parent element node."
+  (vue-ts-mode--treesit-parent-until
+   (treesit-node-parent node)
+   #'vue-ts-mode--element-node-p))
+
+(defun vue-ts-mode--node-contains-pos-p (node pos)
+  "Return non-nil if NODE contains POS."
+  (and node
+       (<= (treesit-node-start node)
+           pos)
+       (< pos
+          (treesit-node-end node))))
+
+(defun vue-ts-mode--element-start-tag (element)
+  "Return ELEMENT's start or self-closing tag node."
+  (cl-find-if #'vue-ts-mode--tag-node-p
+              (treesit-node-children element)))
+
+(defun vue-ts-mode--element-end-tag (element)
+  "Return ELEMENT's end tag node, if any."
+  (cl-find-if
+   (lambda (node)
+     (string= (treesit-node-type node) "end_tag"))
+   (treesit-node-children element)))
+
+(defun vue-ts-mode--tag-at-pos (&optional pos)
+  "Return the Vue tag node at POS.
+When POS is nil, use point."
+  (let ((node (vue-ts-mode--node-at-pos pos)))
+    (vue-ts-mode--treesit-parent-until node #'vue-ts-mode--tag-node-p)))
+
+(defun vue-ts-mode--attribute-value-at-pos (&optional pos)
+  "Return the attribute value node at POS, if any."
+  (vue-ts-mode--treesit-parent-until
+   (vue-ts-mode--node-at-pos pos)
+   #'vue-ts-mode--attribute-value-node-p))
+
+(defun vue-ts-mode--element-sibling (node backward)
+  "Return NODE's previous or next element sibling.
+If BACKWARD is non-nil, return the previous sibling.  Otherwise,
+return the next sibling."
+  (let ((sibling-fn (if backward
+                        #'treesit-node-prev-sibling
+                      #'treesit-node-next-sibling))
+        sibling)
+    (while (and node
+                (setq sibling (funcall sibling-fn node t))
+                (not (vue-ts-mode--element-node-p sibling)))
+      (setq node sibling))
+    (and sibling
+         (vue-ts-mode--element-node-p sibling)
+         sibling)))
+
+(defun vue-ts-mode--goto-node-start (node)
+  "Move point to NODE's start and return point."
+  (goto-char (treesit-node-start node)))
+
+(defun vue-ts-mode--node-first-non-whitespace-pos (node)
+  "Return the first non-whitespace position in NODE."
+  (let ((text (treesit-node-text node t)))
+    (when (string-match-p "[^[:space:]]" text)
+      (+ (treesit-node-start node)
+         (string-match "[^[:space:]]" text)))))
+
+(defun vue-ts-mode--element-first-child-target (node)
+  "Return the first useful navigation child of element NODE."
+  (let ((children (treesit-node-children node)))
+    (or (cl-find-if #'vue-ts-mode--element-node-p children)
+        (cl-find-if
+         (lambda (child)
+           (and (vue-ts-mode--treesit-node-type-p
+                 child vue-ts-mode--element-content-node-types)
+                (vue-ts-mode--node-first-non-whitespace-pos child)))
+         children))))
+
+(defun vue-ts-mode--element-empty-content-pos (element)
+  "Return the insertion position inside empty paired ELEMENT."
+  (when-let* ((start-tag (vue-ts-mode--element-start-tag element))
+              (end-tag (vue-ts-mode--element-end-tag element))
+              (content-start (treesit-node-end start-tag))
+              (content-end (treesit-node-start end-tag)))
+    (when (save-excursion
+            (goto-char content-start)
+            (skip-chars-forward " \t\n" content-end)
+            (= (point) content-end))
+      content-start)))
+
+(defun vue-ts-mode--element-content-contains-pos-p (element pos)
+  "Return non-nil if ELEMENT's content range contains POS."
+  (when-let* ((start-tag (vue-ts-mode--element-start-tag element))
+              (end-tag (vue-ts-mode--element-end-tag element)))
+    (<= (treesit-node-end start-tag)
+        pos
+        (treesit-node-start end-tag))))
+
+(defun vue-ts-mode--content-element-at-pos (&optional pos)
+  "Return the innermost element whose content contains POS."
+  (let ((pos (or pos (point))))
+    (car (last (seq-filter
+                (lambda (element)
+                  (vue-ts-mode--element-content-contains-pos-p element pos))
+                (vue-ts-mode--get-all-elements))))))
+
+(defun vue-ts-mode-element-next-sibling (&optional pos)
+  "Move point to the next element sibling at POS.
+When POS is nil, use point.  If there is no next sibling, do
+nothing."
+  (interactive "d")
+  (when-let* ((element (vue-ts-mode--element-at-pos pos))
+              (sibling (vue-ts-mode--element-sibling element nil)))
+    (vue-ts-mode--goto-node-start sibling)))
+
+(defun vue-ts-mode-element-previous-sibling (&optional pos)
+  "Move point to the previous element sibling at POS.
+When POS is nil, use point.  If there is no previous sibling, do
+nothing."
+  (interactive "d")
+  (when-let* ((element (vue-ts-mode--element-at-pos pos))
+              (sibling (vue-ts-mode--element-sibling element t)))
+    (vue-ts-mode--goto-node-start sibling)))
+
+(defun vue-ts-mode-mark-element (&optional pos)
+  "Mark the whole element at POS, including its children.
+When POS is nil, use point."
+  (interactive "d")
+  (when-let* ((element (vue-ts-mode--element-at-pos pos)))
+    (push-mark (treesit-node-start element) nil t)
+    (goto-char (treesit-node-end element))
+    (activate-mark)))
+
+(defalias 'vue-ts-mode-element-mark #'vue-ts-mode-mark-element)
+
+(defun vue-ts-mode-element-start (&optional pos)
+  "Move point to the start of the element at POS.
+When POS is nil, use point."
+  (interactive "d")
+  (when-let* ((element (vue-ts-mode--element-at-pos pos)))
+    (vue-ts-mode--goto-node-start element)))
+
+(defun vue-ts-mode-element-end (&optional pos)
+  "Move point to the end of the element at POS.
+When POS is nil, use point."
+  (interactive "d")
+  (when-let* ((element (vue-ts-mode--element-at-pos pos)))
+    (goto-char (treesit-node-end element))))
+
+(defalias 'vue-ts-mode-element-beginning #'vue-ts-mode-element-start)
+
+(defun vue-ts-mode--get-all-elements ()
+  "Return a list of all element nodes in the buffer."
+  (flatten-tree (treesit-induce-sparse-tree
+                 (treesit-buffer-root-node 'vue)
+                 (vue-ts-mode--rpartial
+                  vue-ts-mode--treesit-node-type-p
+                  vue-ts-mode--element-node-type-regexp))))
+
+(defun vue-ts-mode-prev-element-dwim (pos)
+  "Move point to the beginning of the nearest HTML element after POS."
+  (interactive "d")
+  (when-let* ((elements (vue-ts-mode--get-all-elements)))
+    (cl-loop for el in elements
+             for next in (cdr elements)
+             if (and (> pos (treesit-node-start el))
+                     (<= pos (treesit-node-start next)))
+             return (goto-char (treesit-node-start el)))))
+
+(defun vue-ts-mode-next-element-dwim (pos)
+  "Move point to the beginning of the nearest HTML element at or before POS."
+  (interactive "d")
+  (when-let* ((elements (vue-ts-mode--get-all-elements))
+              (next-element (cl-find-if (lambda (n)
+                                          (and n (< pos (treesit-node-start n))))
+                                        elements)))
+    (goto-char (treesit-node-start next-element))))
+
+(defun vue-ts-mode-element-parent (&optional pos)
+  "Move point to the parent element of the element at POS.
+When POS is nil, use point.  If there is no parent element, do
+nothing."
+  (interactive "d")
+  (let* ((pos (or pos (point)))
+         (node (treesit-node-at pos 'vue))
+         (content-element (vue-ts-mode--content-element-at-pos pos))
+         (element (or content-element
+                      (vue-ts-mode--element-at-pos pos))))
+    (cond
+     (content-element
+      (vue-ts-mode--goto-node-start content-element))
+     ((and element
+           (vue-ts-mode--treesit-node-type-p
+            node vue-ts-mode--element-content-node-types))
+      (vue-ts-mode--goto-node-start element))
+     (t
+      (when-let* ((parent (and element
+                               (vue-ts-mode--element-parent element))))
+        (vue-ts-mode--goto-node-start parent))))))
+
+(defun vue-ts-mode--backward-up-list-context-p (&optional pos)
+  "Return non-nil if POS is in an attribute value or outside Vue.
+
+Optional argument POS is a buffer position; it defaults to point."
+  (let ((pos (or pos (point))))
+    (or (vue-ts-mode--attribute-value-at-pos pos)
+        (not (eq (vue-ts-mode--treesit-language-at-point pos) 'vue)))))
+
+(defun vue-ts-mode-element-up (&optional pos)
+  "Move up from POS.
+Inside attribute values and embedded script/style code, call
+`backward-up-list'.  Otherwise move to the parent Vue element."
+  (interactive "d")
+  (let ((pos (or pos (point))))
+    (goto-char pos)
+    (if (vue-ts-mode--backward-up-list-context-p pos)
+        (call-interactively #'backward-up-list)
+      (vue-ts-mode-element-parent pos))))
+
+(defun vue-ts-mode-element-child (&optional pos)
+  "Move point to the first useful child of the element at POS.
+Element children are preferred.  If there are no element children,
+move to the first non-whitespace text/interpolation/raw-text child.
+When POS is nil, use point.  If there is no useful child, do
+nothing."
+  (interactive "d")
+  (when-let* ((element (vue-ts-mode--element-at-pos pos)))
+    (if-let* ((child (vue-ts-mode--element-first-child-target element)))
+        (if (vue-ts-mode--element-node-p child)
+            (vue-ts-mode--goto-node-start child)
+          (goto-char (vue-ts-mode--node-first-non-whitespace-pos child)))
+      (when-let* ((empty-pos
+                   (vue-ts-mode--element-empty-content-pos element)))
+        (goto-char empty-pos)))))
+
+(defalias 'vue-ts-mode-element-down #'vue-ts-mode-element-child)
+
+;;; Attribute navigation
+
+(defun vue-ts-mode--attribute-tag-dwim (&optional pos)
+  "Return the tag whose attributes should be navigated at POS.
+Prefer a tag at POS.  Otherwise, use the start or self-closing tag
+of the element at POS."
+  (or (vue-ts-mode--tag-at-pos pos)
+      (when-let* ((element (vue-ts-mode--element-at-pos pos)))
+        (vue-ts-mode--element-start-tag element))))
+
+(defun vue-ts-mode--tag-attributes (tag)
+  "Return TAG's direct attribute nodes."
+  (seq-filter #'vue-ts-mode--attribute-node-p
+              (treesit-node-children tag)))
+
+(defun vue-ts-mode--attribute-at-pos (attributes pos)
+  "Return the attribute in ATTRIBUTES containing POS."
+  (cl-find-if
+   (lambda (attribute)
+     (vue-ts-mode--node-contains-pos-p attribute pos))
+   attributes))
+
+(defun vue-ts-mode--attribute-dwim-target (pos backward)
+  "Return the attribute navigation target from POS.
+If BACKWARD is non-nil, return the previous attribute target.
+Otherwise, return the next attribute target."
+  (when-let* ((tag (vue-ts-mode--attribute-tag-dwim pos))
+              (attributes (vue-ts-mode--tag-attributes tag)))
+    (let* ((effective-pos
+            (if (vue-ts-mode--node-contains-pos-p tag pos)
+                pos
+              (if backward
+                  (treesit-node-end tag)
+                (treesit-node-start tag))))
+           (current (vue-ts-mode--attribute-at-pos attributes effective-pos))
+           previous)
+      (if backward
+          (catch 'target
+            (dolist (attribute attributes previous)
+              (cond
+               ((eq attribute current)
+                (throw 'target previous))
+               ((< (treesit-node-end attribute) effective-pos)
+                (setq previous attribute)))))
+        (if current
+            (cadr (memq current attributes))
+          (cl-find-if
+           (lambda (attribute)
+             (> (treesit-node-start attribute) effective-pos))
+           attributes))))))
+
+(defun vue-ts-mode-next-attribute-dwim (&optional pos)
+  "Move to the next attribute, or the next element if none exists.
+
+Optional argument POS is a buffer position; it defaults to point."
+  (interactive "d")
+  (unless pos (setq pos (point)))
+  (if-let* ((attribute (vue-ts-mode--attribute-dwim-target
+                        pos nil)))
+      (vue-ts-mode--goto-node-start attribute)
+    (vue-ts-mode-next-element-dwim pos)))
+
+(defun vue-ts-mode-previous-attribute-dwim (&optional pos)
+  "Move to the previous Vue attribute, or previous element if none.
+
+Optional argument POS is a buffer position; it defaults to point."
+  (interactive "d")
+  (unless pos (setq pos (point)))
+  (if-let* ((attribute (vue-ts-mode--attribute-dwim-target
+                        (or pos (point)) t)))
+      (vue-ts-mode--goto-node-start attribute)
+    (vue-ts-mode-prev-element-dwim pos)))
+
+(defalias 'vue-ts-mode-attribute-next-dwim
+  #'vue-ts-mode-next-attribute-dwim)
+(defalias 'vue-ts-mode-attribute-previous-dwim
+  #'vue-ts-mode-previous-attribute-dwim)
+
+;;; Element movement
+
+(defun vue-ts-mode--node-markers (node)
+  "Return start and end markers for NODE."
+  (cons (copy-marker (treesit-node-start node))
+        (copy-marker (treesit-node-end node) t)))
+
+(defun vue-ts-mode--node-line-range (node)
+  "Return a cons cell for NODE's movable text range.
+When NODE is the only non-whitespace text on its outer lines,
+include the leading indentation and trailing newline.  Otherwise,
+return NODE's exact range."
+  (let ((start (treesit-node-start node))
+        (end (treesit-node-end node)))
+    (save-excursion
+      (save-restriction
+        (widen)
+        (let ((range-start start)
+              (range-end end))
+          (goto-char start)
+          (let ((bol (line-beginning-position)))
+            (when (save-excursion
+                    (goto-char bol)
+                    (skip-chars-forward " \t" start)
+                    (= (point) start))
+              (setq range-start bol)))
+          (goto-char end)
+          (let ((eol (line-end-position)))
+            (when (save-excursion
+                    (skip-chars-forward " \t" eol)
+                    (= (point) eol))
+              (setq range-end
+                    (if (< eol (point-max))
+                        (1+ eol)
+                      eol))))
+          (cons range-start range-end))))))
+
+(defun vue-ts-mode--swap-nodes (node-a node-b)
+  "Swap NODE-A and NODE-B in the current buffer."
+  (pcase-let ((`(,node-a-start . ,node-a-end)
+               (vue-ts-mode--node-markers node-a))
+              (`(,node-b-start . ,node-b-end)
+               (vue-ts-mode--node-markers node-b)))
+    (let ((node-a-text (treesit-node-text node-a t))
+          (node-b-text (treesit-node-text node-b t)))
+      (atomic-change-group
+        (delete-region node-a-start node-a-end)
+        (delete-region node-b-start node-b-end)
+        (goto-char node-a-start)
+        (insert node-b-text)
+        (goto-char node-b-start)
+        (insert node-a-text)
+        (goto-char node-b-start)))
+    (set-marker node-a-start nil)
+    (set-marker node-a-end nil)
+    (set-marker node-b-start nil)
+    (set-marker node-b-end nil)))
+
+(defun vue-ts-mode--move-element-to-sibling (element backward)
+  "Swap ELEMENT with a sibling.
+If BACKWARD is non-nil, swap with the previous element sibling.
+Otherwise, swap with the next element sibling."
+  (when-let* ((sibling (vue-ts-mode--element-sibling element backward)))
+    (vue-ts-mode--swap-nodes element sibling)
+    t))
+
+(defun vue-ts-mode--move-element-out (element backward)
+  "Move ELEMENT out of its parent.
+If BACKWARD is non-nil, move ELEMENT before its parent.  Otherwise,
+move it after its parent."
+  (when-let* ((parent (vue-ts-mode--element-parent element))
+              (_ (string= (treesit-node-type parent) "element")))
+    (pcase-let* ((`(,element-start . ,element-end)
+                  (vue-ts-mode--node-line-range element))
+                 (`(,parent-start . ,parent-end)
+                  (vue-ts-mode--node-line-range parent))
+                 (insert-marker (copy-marker
+                                 (if backward parent-start parent-end)
+                                 (not backward)))
+                 (text (buffer-substring-no-properties
+                        element-start element-end)))
+      (atomic-change-group
+        (delete-region element-start element-end)
+        (goto-char insert-marker)
+        (let ((insert-start (point)))
+          (insert text)
+          (indent-region insert-start (point))
+          (goto-char insert-start)
+          (back-to-indentation)))
+      (set-marker insert-marker nil)
+      t)))
+
+(defun vue-ts-mode-element-move-previous-sibling (&optional pos)
+  "Move the element at POS before its previous element sibling.
+When POS is nil, use point.  If there is no previous sibling, do
+nothing."
+  (interactive "d")
+  (when-let* ((element (vue-ts-mode--element-at-pos pos)))
+    (vue-ts-mode--move-element-to-sibling element t)))
+
+(defun vue-ts-mode-element-move-next-sibling (&optional pos)
+  "Move the element at POS after its next element sibling.
+When POS is nil, use point.  If there is no next sibling, do
+nothing."
+  (interactive "d")
+  (when-let* ((element (vue-ts-mode--element-at-pos pos)))
+    (vue-ts-mode--move-element-to-sibling element nil)))
+
+(defun vue-ts-mode-element-move-up (&optional pos)
+  "Move the element at POS before its parent.
+When POS is nil, use point.  If the element cannot move out of its
+parent, do nothing."
+  (interactive "d")
+  (when-let* ((element (vue-ts-mode--element-at-pos pos)))
+    (vue-ts-mode--move-element-out element t)))
+
+(defun vue-ts-mode-element-move-down (&optional pos)
+  "Move the element at POS after its parent.
+When POS is nil, use point.  If the element cannot move out of its
+parent, do nothing."
+  (interactive "d")
+  (when-let* ((element (vue-ts-mode--element-at-pos pos)))
+    (vue-ts-mode--move-element-out element nil)))
+
+(defun vue-ts-mode-element-move-up-dwim (&optional pos)
+  "Move the element at POS upward.
+Prefer swapping with the previous element sibling.  If there is no
+previous sibling, move the element before its parent."
+  (interactive "d")
+  (when-let* ((element (vue-ts-mode--element-at-pos pos)))
+    (or (vue-ts-mode--move-element-to-sibling element t)
+        (vue-ts-mode--move-element-out element t))))
+
+(defun vue-ts-mode-element-move-down-dwim (&optional pos)
+  "Move the element at POS downward.
+Prefer swapping with the next element sibling.  If there is no next
+sibling, move the element after its parent."
+  (interactive "d")
+  (when-let* ((element (vue-ts-mode--element-at-pos pos)))
+    (or (vue-ts-mode--move-element-to-sibling element nil)
+        (vue-ts-mode--move-element-out element nil))))
+
 ;;;###autoload
 (define-derived-mode vue-ts-mode prog-mode "Vue-ts"
   "Major mode for editing Vue templates, powered by tree-sitter."
@@ -431,6 +987,25 @@ Remaining arguments ARGS are the arguments passed to FN."
  #'comment-dwim
  :around
  #'vue-ts-mode--advice-for-comment-fns)
+
+
+;;;###autoload (autoload 'vue-ts-mode-menu "vue-ts-mode" nil t)
+(transient-define-prefix vue-ts-mode-menu ()
+  :transient-suffix     #'transient--do-call
+  :transient-non-suffix #'transient--do-exit
+  ["Move"
+   ("p" "Prev or up" vue-ts-mode-prev-element-dwim)
+   ("n" "Next or down" vue-ts-mode-next-element-dwim)
+   ("N" "Next sibling" vue-ts-mode-element-next-sibling)
+   ("P" "Prev sibling" vue-ts-mode-element-previous-sibling)
+   ("u" "Up" vue-ts-mode-element-up)
+   ("d" "Down" vue-ts-mode-element-down)
+   ("<tab>" "Next attribute" vue-ts-mode-next-attribute-dwim)
+   ("S-<tab>" "Previous attribute" vue-ts-mode-previous-attribute-dwim)
+   ("C-M-a" "Start fo element" vue-ts-mode-element-start)
+   ("C-M-e" "End fo element" vue-ts-mode-element-end)]
+  [["Mark"
+    ("m" "Mark element" vue-ts-mode-mark-element)]])
 
 (provide 'vue-ts-mode)
 ;;; vue-ts-mode.el ends here
