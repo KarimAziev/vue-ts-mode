@@ -76,6 +76,98 @@
   "Face for html tags angle brackets (<, > and />)."
   :group 'vue-ts-mode-faces)
 
+(defconst vue-ts-mode--html-entity-regexp
+  "&\\(?:[[:alpha:]][[:alnum:]]*\\|#[[:digit:]]+\\|#[xX][[:xdigit:]]+\\);"
+  "Regexp matching HTML named and numeric character references.")
+
+(defun vue-ts-mode--match-html-entity (limit)
+  "Search for an HTML entity before LIMIT in Vue template code."
+  (catch 'match
+    (while (re-search-forward vue-ts-mode--html-entity-regexp limit t)
+      (when (eq (vue-ts-mode--treesit-language-at-point (match-beginning 0))
+                'vue)
+        (throw 'match t)))
+    nil))
+
+
+(defvar vue-ts-mode--font-lock-keywords
+  '((vue-ts-mode--match-html-entity . font-lock-constant-face))
+  "Additional non-tree-sitter font-lock keywords for `vue-ts-mode'.")
+
+(defun vue-ts-mode--fontify-directive-attribute (node override start end &rest _)
+  "Fontify Vue directive attribute NODE.
+
+Arguments OVERRIDE, START and END have the same meaning as in
+`treesit-fontify-with-override'.
+
+Remaining arguments _ are ignored."
+  (let* ((node-start (treesit-node-start node))
+         (node-end (treesit-node-end node))
+         (name-end nil)
+         (arg-start nil)
+         (shorthand-bind nil)
+         (bind-directive nil)
+         (value-start nil))
+    (save-excursion
+      (goto-char node-start)
+      (when (looking-at "\\(?:v-[^<>'\"=/[:space:].:]+\\|[:@#]\\)")
+        (setq name-end (match-end 0))
+        (setq shorthand-bind (string= (match-string 0) ":"))
+        (setq bind-directive (or shorthand-bind
+                                 (string= (match-string 0) "v-bind")))
+        (treesit-fontify-with-override
+         (match-beginning 0) name-end
+         'font-lock-keyword-face override start end)
+        (setq arg-start
+              (cond
+               ((memq (char-after node-start) '(?: ?@ ?#))
+                (1+ node-start))
+               ((and (< name-end node-end) (eq (char-after name-end) ?:))
+                (1+ name-end))))
+        (when arg-start
+          (goto-char arg-start)
+          (if (eq (char-after) ?\[)
+              (when-let* ((close-bracket
+                           (save-excursion
+                             (search-forward "]" node-end t))))
+                (treesit-fontify-with-override
+                 arg-start (1+ arg-start)
+                 'font-lock-bracket-face override start end)
+                (treesit-fontify-with-override
+                 (1+ arg-start)
+                 (1- close-bracket)
+                 (if bind-directive
+                     'font-lock-builtin-face
+                   'font-lock-variable-name-face)
+                 override start end)
+                (treesit-fontify-with-override
+                 (1- close-bracket) close-bracket
+                 'font-lock-bracket-face override start end))
+            (when (looking-at "[^<>'\"=/[:space:].]+")
+              (treesit-fontify-with-override
+               (match-beginning 0)
+               (match-end 0)
+               (if bind-directive
+                   'font-lock-builtin-face
+                 'font-lock-property-name-face)
+               override start end))))
+        (when (setq value-start
+                    (save-excursion
+                      (search-forward "=" node-end t)))
+          (unless shorthand-bind
+            (treesit-fontify-with-override
+             (1- value-start) value-start
+             'font-lock-keyword-face override start end)))
+        (goto-char (or arg-start name-end))
+        (while (re-search-forward
+                "\\.\\([^<>'\"=/[:space:].]+\\)"
+                (or (and value-start (1- value-start)) node-end)
+                t)
+          (treesit-fontify-with-override
+           (match-beginning 1)
+           (match-end 1)
+           'font-lock-constant-face override start end))))))
+
 (defun vue-ts-mode--prefix-font-lock-features (prefix settings)
   "Prefix with PREFIX the font lock features in SETTINGS."
   (mapcar (lambda (setting)
@@ -129,10 +221,14 @@
     :language 'vue
     :override t
     :feature 'vue-directive
-    '((_ (_
-          (directive_attribute
-           (directive_name) @font-lock-keyword-face
-           (directive_argument) @font-lock-type-face))))
+    '((directive_attribute) @vue-ts-mode--fontify-directive-attribute)
+
+    :language 'vue
+    :feature 'vue-directive-value
+    '((directive_attribute
+       [(attribute_value)
+        (quoted_attribute_value (attribute_value))]
+       @font-lock-variable-name-face))
 
     :language 'vue
     :override t
@@ -292,7 +388,8 @@ Remaining arguments ARGS are the arguments passed to FN."
                            css-string
                            typescript-keyword
                            typescript-string typescript-escape-sequence)
-                  (vue-sp-dir css-error css-variable css-function
+                  (vue-sp-dir vue-directive-value
+                              css-error css-variable css-function
                               css-operator
                               typescript-constant
                               typescript-expression typescript-identifier
@@ -314,7 +411,8 @@ Remaining arguments ARGS are the arguments passed to FN."
 
     (setq-local treesit-primary-parser (treesit-parser-create 'vue))
 
-    (treesit-major-mode-setup)))
+    (treesit-major-mode-setup)
+    (font-lock-add-keywords nil vue-ts-mode--font-lock-keywords 'append)))
 
 (if (treesit-ready-p 'vue)
     (add-to-list 'auto-mode-alist '("\\.vue\\'" . vue-ts-mode)))
