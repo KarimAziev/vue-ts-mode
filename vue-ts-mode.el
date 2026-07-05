@@ -4,9 +4,10 @@
 ;; Copyright (C) 2026 Karim Aziiev <karim.aziiev@gmail.com>
 
 ;; Author: 8uff3r <8uff3r@gmail.com>
+;; Maintainer: Karim Aziiev <karim.aziiev@gmail.com>
 ;; Homepage: https://github.com/KarimAziev/vue-ts-mode
 ;; Version: 1.0.0
-;; Package-Requires: ((emacs "30") (cl-lib "6.0.6") (transient "0.13.4"))
+;; Package-Requires: ((emacs "30"))
 ;; Keywords: languages
 ;; URL: https://github.com/KarimAziev/vue-ts-mode
 ;; SPDX-License-Identifier: GPL-3.0-or-later
@@ -44,12 +45,8 @@
 (require 'css-mode)
 (require 'transient)
 
-(defgroup vue ()
-  "Major mode for editing Vue templates."
-  :group 'languages)
 
 ;; Indent Rules
-
 (defcustom vue-ts-mode-indent-offset 2
   "Number of spaces for each indentation step in `vue-ts-mode'."
   :type 'integer
@@ -79,6 +76,7 @@ at the values with which this function was called."
        ,(car (list
               `(apply ,@(vue-ts-mode--expand fn)
                 (append ,pre-args (list ,@args))))))))
+
 
 (defvar vue-ts-mode--indent-rules
   `((vue
@@ -588,15 +586,19 @@ When POS is nil, use point."
   "Move point to the start of the element at POS.
 When POS is nil, use point."
   (interactive "d")
-  (when-let* ((element (vue-ts-mode--element-at-pos pos)))
-    (vue-ts-mode--goto-node-start element)))
+  (if (not (eq (vue-ts-mode--treesit-language-at-point pos) 'vue))
+      (call-interactively #'beginning-of-defun)
+    (when-let* ((element (vue-ts-mode--element-at-pos pos)))
+      (vue-ts-mode--goto-node-start element))))
 
 (defun vue-ts-mode-element-end (&optional pos)
   "Move point to the end of the element at POS.
 When POS is nil, use point."
   (interactive "d")
-  (when-let* ((element (vue-ts-mode--element-at-pos pos)))
-    (goto-char (treesit-node-end element))))
+  (if (not (eq (vue-ts-mode--treesit-language-at-point pos) 'vue))
+      (call-interactively #'end-of-defun)
+    (when-let* ((element (vue-ts-mode--element-at-pos pos)))
+      (goto-char (treesit-node-end element)))))
 
 (defalias 'vue-ts-mode-element-beginning #'vue-ts-mode-element-start)
 
@@ -611,21 +613,26 @@ When POS is nil, use point."
 (defun vue-ts-mode-prev-element-dwim (pos)
   "Move point to the beginning of the nearest HTML element after POS."
   (interactive "d")
-  (when-let* ((elements (vue-ts-mode--get-all-elements)))
-    (cl-loop for el in elements
-             for next in (cdr elements)
-             if (and (> pos (treesit-node-start el))
-                     (<= pos (treesit-node-start next)))
-             return (goto-char (treesit-node-start el)))))
+  (if (vue-ts-mode--in-attr-value-or-not-vue-p)
+      (call-interactively #'backward-list)
+    (when-let* ((elements (vue-ts-mode--get-all-elements)))
+      (cl-loop for el in elements
+               for next in (cdr elements)
+               if (and (> pos (treesit-node-start el))
+                       (<= pos (treesit-node-start next)))
+               return (goto-char (treesit-node-start el))))))
 
 (defun vue-ts-mode-next-element-dwim (pos)
   "Move point to the beginning of the nearest HTML element at or before POS."
   (interactive "d")
-  (when-let* ((elements (vue-ts-mode--get-all-elements))
-              (next-element (cl-find-if (lambda (n)
-                                          (and n (< pos (treesit-node-start n))))
-                                        elements)))
-    (goto-char (treesit-node-start next-element))))
+  (if (vue-ts-mode--in-attr-value-or-not-vue-p)
+      (call-interactively #'forward-list)
+    (when-let* ((elements (vue-ts-mode--get-all-elements))
+                (next-element (cl-find-if
+                               (lambda (n)
+                                 (and n (< pos (treesit-node-start n))))
+                               elements)))
+      (goto-char (treesit-node-start next-element)))))
 
 (defun vue-ts-mode-element-parent (&optional pos)
   "Move point to the parent element of the element at POS.
@@ -649,10 +656,12 @@ nothing."
                                (vue-ts-mode--element-parent element))))
         (vue-ts-mode--goto-node-start parent))))))
 
-(defun vue-ts-mode--backward-up-list-context-p (&optional pos)
+
+(defun vue-ts-mode--in-attr-value-or-not-vue-p (&optional pos)
   "Return non-nil if POS is in an attribute value or outside Vue.
 
 Optional argument POS is a buffer position; it defaults to point."
+
   (let ((pos (or pos (point))))
     (or (vue-ts-mode--attribute-value-at-pos pos)
         (not (eq (vue-ts-mode--treesit-language-at-point pos) 'vue)))))
@@ -664,9 +673,20 @@ Inside attribute values and embedded script/style code, call
   (interactive "d")
   (let ((pos (or pos (point))))
     (goto-char pos)
-    (if (vue-ts-mode--backward-up-list-context-p pos)
+    (if (vue-ts-mode--in-attr-value-or-not-vue-p pos)
         (call-interactively #'backward-up-list)
       (vue-ts-mode-element-parent pos))))
+
+(defun vue-ts-mode-element-down (&optional pos)
+  "Move point down into a list or the element's first useful child.
+
+Optional argument POS is a buffer position; it defaults to point."
+  (interactive "d")
+  (let ((pos (or pos (point))))
+    (goto-char pos)
+    (if (vue-ts-mode--in-attr-value-or-not-vue-p pos)
+        (call-interactively #'down-list)
+      (vue-ts-mode-element-child pos))))
 
 (defun vue-ts-mode-element-child (&optional pos)
   "Move point to the first useful child of the element at POS.
@@ -683,8 +703,6 @@ nothing."
       (when-let* ((empty-pos
                    (vue-ts-mode--element-empty-content-pos element)))
         (goto-char empty-pos)))))
-
-(defalias 'vue-ts-mode-element-down #'vue-ts-mode-element-child)
 
 ;;; Attribute navigation
 
@@ -743,10 +761,13 @@ Otherwise, return the next attribute target."
 Optional argument POS is a buffer position; it defaults to point."
   (interactive "d")
   (unless pos (setq pos (point)))
-  (if-let* ((attribute (vue-ts-mode--attribute-dwim-target
-                        pos nil)))
-      (vue-ts-mode--goto-node-start attribute)
-    (vue-ts-mode-next-element-dwim pos)))
+  (if (not (eq (vue-ts-mode--treesit-language-at-point pos) 'vue))
+      (call-interactively #'forward-to-indentation)
+    (if-let* ((attribute (vue-ts-mode--attribute-dwim-target
+                          pos nil)))
+        (vue-ts-mode--goto-node-start attribute)
+      (vue-ts-mode-next-element-dwim pos))))
+
 
 (defun vue-ts-mode-previous-attribute-dwim (&optional pos)
   "Move to the previous Vue attribute, or previous element if none.
@@ -754,10 +775,12 @@ Optional argument POS is a buffer position; it defaults to point."
 Optional argument POS is a buffer position; it defaults to point."
   (interactive "d")
   (unless pos (setq pos (point)))
-  (if-let* ((attribute (vue-ts-mode--attribute-dwim-target
-                        (or pos (point)) t)))
-      (vue-ts-mode--goto-node-start attribute)
-    (vue-ts-mode-prev-element-dwim pos)))
+  (if (not (eq (vue-ts-mode--treesit-language-at-point pos) 'vue))
+      (call-interactively #'back-to-indentation)
+    (if-let* ((attribute (vue-ts-mode--attribute-dwim-target
+                          (or pos (point)) t)))
+        (vue-ts-mode--goto-node-start attribute)
+      (vue-ts-mode-prev-element-dwim pos))))
 
 (defalias 'vue-ts-mode-attribute-next-dwim
   #'vue-ts-mode-next-attribute-dwim)
@@ -988,23 +1011,40 @@ sibling, move the element after its parent."
  :around
  #'vue-ts-mode--advice-for-comment-fns)
 
+(defvar-keymap vue-ts-mode-repeat-map
+  :doc
+  "Keymap to repeat navigation commands."
+  :repeat t
+  "p" #'vue-ts-mode-prev-element-dwim
+  "n" #'vue-ts-mode-next-element-dwim
+  "N" #'vue-ts-mode-element-next-sibling
+  "P" #'vue-ts-mode-element-previous-sibling
+  "d" #'vue-ts-mode-element-down
+  "u" #'vue-ts-mode-element-up
+  "a" #'vue-ts-mode-element-start
+  "e" #'vue-ts-mode-element-end)
+
 
 ;;;###autoload (autoload 'vue-ts-mode-menu "vue-ts-mode" nil t)
 (transient-define-prefix vue-ts-mode-menu ()
   :transient-suffix     #'transient--do-call
   :transient-non-suffix #'transient--do-exit
-  ["Move"
-   ("p" "Prev or up" vue-ts-mode-prev-element-dwim)
-   ("n" "Next or down" vue-ts-mode-next-element-dwim)
-   ("N" "Next sibling" vue-ts-mode-element-next-sibling)
-   ("P" "Prev sibling" vue-ts-mode-element-previous-sibling)
-   ("u" "Up" vue-ts-mode-element-up)
-   ("d" "Down" vue-ts-mode-element-down)
-   ("<tab>" "Next attribute" vue-ts-mode-next-attribute-dwim)
-   ("S-<tab>" "Previous attribute" vue-ts-mode-previous-attribute-dwim)
-   ("C-M-a" "Start fo element" vue-ts-mode-element-start)
-   ("C-M-e" "End fo element" vue-ts-mode-element-end)]
-  [["Mark"
+  [["Elements Navigation"
+    ("p" "Previous or up" vue-ts-mode-prev-element-dwim)
+    ("n" "Next or down" vue-ts-mode-next-element-dwim)
+    ""
+    ("a" "Start of element" vue-ts-mode-element-start)
+    ("e" "End of element" vue-ts-mode-element-end)
+    ""
+    ("N" "Next sibling" vue-ts-mode-element-next-sibling)
+    ("P" "Prev sibling" vue-ts-mode-element-previous-sibling)
+    ""
+    ("u" "Up element" vue-ts-mode-element-up)
+    ("d" "Down element" vue-ts-mode-element-down)]
+   ["Attributes navigation"
+    ("<tab>" "Next attribute" vue-ts-mode-next-attribute-dwim)
+    ("S-<tab>" "Previous attribute" vue-ts-mode-previous-attribute-dwim)
+    "Mark"
     ("m" "Mark element" vue-ts-mode-mark-element)]])
 
 (provide 'vue-ts-mode)

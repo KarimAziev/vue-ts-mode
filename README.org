@@ -1,7 +1,45 @@
-* Vue-ts-mode
-A major mode for editing [[https://vuejs.org/][Vue]] components. Requires Emacs 30.
+* About
+This fork focuses on making Vue single-file components comfortable to edit in
+Emacs with built-in Tree-sitter support. In particular, and adds element-aware
+navigation and editing commands for Vue markup.
 
 [[./screenshot.png]]
+
+
+* vue-ts-mode                                                :TOC_3_gh:QUOTE:
+#+BEGIN_QUOTE
+- [[#about][About]]
+  - [[#differences-from-the-original-package][Differences from the original package]]
+  - [[#installation][Installation]]
+  - [[#setup][Setup]]
+  - [[#commands][Commands]]
+    - [[#element-navigation][Element navigation]]
+    - [[#attribute-navigation][Attribute navigation]]
+    - [[#element-movement][Element movement]]
+    - [[#transient-menu][Transient menu]]
+  - [[#example-key-bindings][Example key bindings]]
+  - [[#credits][Credits]]
+#+END_QUOTE
+
+** Differences from the original package
+- Better (opinionated) template fontification for Vue directive attributes.
+  - Shorthand binding prefixes such as =:= and event prefixes such as =@= are
+    highlighted.
+  - Dynamic prop names in shorthand and =v-bind:= attributes use a distinct face
+    from static HTML attributes, so =:message== is easier to distinguish from
+    =autocomplete==.
+  - Directive values continue to be handled through embedded TypeScript ranges
+    where possible.
+- HTML entities such as =&nbsp;=, =&amp;=, =&#160;= and =&#xA0;= are highlighted in
+  Vue template text.
+- Element navigation commands operate on Tree-sitter Vue element nodes rather
+  than plain text search.
+- Attribute navigation commands understand both normal HTML attributes and Vue
+  directive attributes.
+- Element movement commands can swap siblings or move an element out of its
+  parent while preserving sensible indentation.
+- A small transient menu is provided as a discoverable entry point for the
+  navigation commands.
 
 ** Installation
 Clone this repo anywhere you want, probably somewhere in =~/.emacs.d= . Then, add the directory to your =load-path=.
@@ -9,13 +47,23 @@ Clone this repo anywhere you want, probably somewhere in =~/.emacs.d= . Then, ad
 For example:
 #+begin_example
   cd ~/.emacs.d
-  git clone https://github.com/8uff3r/vue-ts-mode.git
+  git clone https://github.com/KarimAziev/vue-ts-mode.git
 #+end_example
 
 Then, in =init.el=:
 #+begin_src emacs-lisp
+
   (add-to-list 'load-path (concat user-emacs-directory "vue-ts-mode"))
   (require 'vue-ts-mode)
+#+end_src
+
+With =use-package= and =straight.el=:
+#+begin_src emacs-lisp
+(use-package vue-ts-mode
+  :straight (vue-ts-mode
+             :flavor nil
+             :repo "https://github.com/KarimAziev/vue-ts-mode.git")
+  :mode ("\\.vue\\'" . vue-ts-mode))
 #+end_src
 
 ** Setup
@@ -38,6 +86,89 @@ Once that's been setup, you'll need to run =treesit-install-language-grammar= on
 
 Make sure you have a working C compiler as =cc= in your PATH, since this needs to compile the grammars.
 
+** Commands
+The mode does not impose default key bindings for every editing command.  Bind
+the commands you use often in =vue-ts-mode-map=, or call =vue-ts-mode-menu= for a
+transient menu.
+
+*** Element navigation
+These commands use the Vue Tree-sitter tree and work from inside a tag,
+attribute, or element body where possible.
+
+
+| Command                                | Description                                                                                                                         |
+|----------------------------------------+-------------------------------------------------------------------------------------------------------------------------------------|
+| =vue-ts-mode-element-next-sibling=     | Move to the next element sibling at the same level.                                                                                 |
+| =vue-ts-mode-element-previous-sibling= | Move to the previous element sibling at the same level.                                                                             |
+| =vue-ts-mode-element-up=               | Move to the containing element; inside attribute values or embedded script/style code, call =backward-up-list=.                     |
+| =vue-ts-mode-element-parent=           | Move to the containing Vue element without the embedded-language DWIM behavior.                                                     |
+| =vue-ts-mode-element-down=             | Move to the first child element, text/interpolation content, or the insertion point in an empty paired tag such as =<span></span>=. |
+| =vue-ts-mode-element-start=            | Move to the start of the current element.                                                                                           |
+| =vue-ts-mode-element-end=              | Move to the end of the current element.                                                                                             |
+| =vue-ts-mode-mark-element=             | Mark the whole current element, including children.                                                                                 |
+| =vue-ts-mode-next-element-dwim=        | Move to the next element in document order.                                                                                         |
+| =vue-ts-mode-prev-element-dwim=        | Move to the previous element in document order.                                                                                     |
+
+Aliases:
+- =vue-ts-mode-element-beginning= is an alias for =vue-ts-mode-element-start=.
+- =vue-ts-mode-element-mark= is an alias for =vue-ts-mode-mark-element=.
+
+*** Attribute navigation
+Attribute commands operate on the start tag or self-closing tag for the current
+element.  They understand both regular attributes such as =autocomplete="off"=
+and Vue directive attributes such as =:message="message"= or
+=@update:model-value="handleUpdate"=.
+
+| Command                               | Description                                                                                                                             |
+|---------------------------------------+-----------------------------------------------------------------------------------------------------------------------------------------|
+| =vue-ts-mode-next-attribute-dwim=     | Move to the next attribute in the current tag; when there is no next attribute, fall back to the next element DWIM command.             |
+| =vue-ts-mode-previous-attribute-dwim= | Move to the previous attribute in the current tag; when there is no previous attribute, fall back to the previous element DWIM command. |
+
+Aliases:
+- =vue-ts-mode-attribute-next-dwim= is an alias for =vue-ts-mode-next-attribute-dwim=.
+- =vue-ts-mode-attribute-previous-dwim= is an alias for =vue-ts-mode-previous-attribute-dwim=.
+
+*** Element movement
+Movement commands preserve the current element as the editing unit.  The sibling
+commands swap same-level elements.  The up/down commands move an element before
+or after its parent.
+
+| Command                                     | Description                                                                     |
+|---------------------------------------------+---------------------------------------------------------------------------------|
+| =vue-ts-mode-element-move-previous-sibling= | Swap the current element with its previous sibling.                             |
+| =vue-ts-mode-element-move-next-sibling=     | Swap the current element with its next sibling.                                 |
+| =vue-ts-mode-element-move-up=               | Move the current element before its parent element.                             |
+| =vue-ts-mode-element-move-down=             | Move the current element after its parent element.                              |
+| =vue-ts-mode-element-move-up-dwim=          | Swap with the previous sibling when possible; otherwise move before the parent. |
+| =vue-ts-mode-element-move-down-dwim=        | Swap with the next sibling when possible; otherwise move after the parent.      |
+
+*** Transient menu
+Run:
+#+begin_example
+  M-x vue-ts-mode-menu
+#+end_example
+
+The menu exposes the main element movement and navigation commands, including
+attribute navigation.
+
+** Example key bindings
+One possible local setup:
+#+begin_src emacs-lisp
+  (with-eval-after-load 'vue-ts-mode
+    (define-key vue-ts-mode-map (kbd "C-c v m") #'vue-ts-mode-menu)
+    (define-key vue-ts-mode-map (kbd "C-c v n") #'vue-ts-mode-element-next-sibling)
+    (define-key vue-ts-mode-map (kbd "C-c v p") #'vue-ts-mode-element-previous-sibling)
+    (define-key vue-ts-mode-map (kbd "C-c v u") #'vue-ts-mode-element-up)
+    (define-key vue-ts-mode-map (kbd "C-c v d") #'vue-ts-mode-element-down)
+    (define-key vue-ts-mode-map (kbd "C-c v a") #'vue-ts-mode-mark-element)
+    (define-key vue-ts-mode-map (kbd "C-c v <tab>") #'vue-ts-mode-next-attribute-dwim)
+    (define-key vue-ts-mode-map (kbd "C-c v <backtab>") #'vue-ts-mode-previous-attribute-dwim))
+#+end_src
+
 ** Credits
-- [[ https://github.com/ikatyang/ ][ikatyang]] for [[https://github.com/ikatyang/tree-sitter-vue][tree-sitter-vue]], the Tree-sitter grammar this major mode is built on
-- [[https://github.com/virchau13][Ruby Iris Juric]] for [[https://github.com/Sorixelle/astro-ts-mode][astro-ts-mode]], which this is based on, even this Readme :)
+- [[https://github.com/8uff3r][8uff3r]] for the original [[https://github.com/8uff3r/vue-ts-mode][vue-ts-mode]] package.
+- [[https://github.com/theschmocker][Jacob Schmocker]] for the editing commands in his own [[https://github.com/theschmocker/vue-ts-mode][vue-ts-mode]].
+- [[https://github.com/ikatyang][ikatyang]] for [[https://github.com/ikatyang/tree-sitter-vue][tree-sitter-vue]], the Tree-sitter grammar this major mode is built on.
+- [[https://github.com/virchau13][Ruby Iris Juric]] for [[https://github.com/Sorixelle/astro-ts-mode][astro-ts-mode]], which the original package was based on, including the initial README structure.
+- The Emacs maintainers for built-in Tree-sitter support, =typescript-ts-mode=,
+  =css-mode= and the underlying editor APIs this mode builds on.
