@@ -54,6 +54,21 @@
   :package-version '(vue-ts-mode . "1.0.0"))
 
 
+(defvar vue-ts-mode-syntax-table
+  (let ((st (make-syntax-table)))
+    (dolist (spec '((?=  ".")
+                    (?-  "_")
+                    (?_  "_")
+                    (?<  ".")
+                    (?>  ".")
+                    (?&  ".")
+                    (?/  ".")
+                    (?%  ".")))
+      (modify-syntax-entry (car spec)
+                           (cadr spec) st))
+    st)
+  "Syntax table for `vue-ts-mode'.")
+
 
 (eval-and-compile
   (defun vue-ts-mode--expand (init-fn)
@@ -66,7 +81,6 @@ Otherwise, return it as is."
 
 (defmacro vue-ts-mode--rpartial (fn &rest args)
   "Return a partial application of a function FN to right-hand ARGS.
-
 ARGS is a list of the last N arguments to pass to FN. The result is a new
 function which does the same as FN, except that the last N arguments are fixed
 at the values with which this function was called."
@@ -100,7 +114,7 @@ at the values with which this function was called."
 ;; font-lock rules
 (defface vue-ts-mode-template-tag-bracket-face
   '((t :foreground "#86e1fc"))
-  "Face for html tags angle brackets (<, > and />)."
+  "Face for html tags angle brackets (<, > and />) ."
   :group 'vue-ts-mode-faces)
 
 (defconst vue-ts-mode--html-entity-regexp
@@ -933,30 +947,23 @@ sibling, move the element after its parent."
 (define-derived-mode vue-ts-mode prog-mode "Vue-ts"
   "Major mode for editing Vue templates, powered by tree-sitter."
   :group 'vue
-  ;; :syntax-table html-mode-syntax-table
-
+  :syntax-table vue-ts-mode-syntax-table
   (unless (treesit-ready-p 'vue)
     (error "Tree-sitter grammar for Vue isn't available"))
-
   (unless (treesit-ready-p 'css)
     (error "Tree-sitter grammar for CSS isn't available"))
-
   (unless (treesit-ready-p 'typescript)
     (error "Tree-sitter grammar for Typescript/TYPESCRIPT isn't available"))
-
   (when (treesit-ready-p 'typescript)
     (treesit-parser-create 'vue)
     (treesit-parser-create 'typescript)
     (treesit-parser-create 'css)
-
     ;; Comments and text content
     (setq-local treesit-text-type-regexp
                 (regexp-opt '("comment" "text")))
-
     ;; Indentation rules
     (setq-local treesit-simple-indent-rules vue-ts-mode--indent-rules
                 css-indent-offset vue-ts-mode-indent-offset)
-
     ;; Font locking
     (setq-local treesit-font-lock-settings (vue-ts-mode--font-lock-settings))
     (setq-local treesit-font-lock-feature-list
@@ -964,32 +971,29 @@ sibling, move the element after its parent."
                    css-comment css-query css-keyword
                    typescript-comment typescript-declaration)
                   (vue-ref vue-string vue-directive css-property css-constant
-                           css-string
-                           typescript-keyword
-                           typescript-string typescript-escape-sequence)
+                   css-string
+                   typescript-keyword
+                   typescript-string typescript-escape-sequence)
                   (vue-sp-dir vue-directive-value
-                              css-error css-variable css-function
-                              css-operator
-                              typescript-constant
-                              typescript-expression typescript-identifier
-                              typescript-number typescript-pattern
-                              typescript-operator
-                              typescript-property)
+                   css-error css-variable css-function
+                   css-operator
+                   typescript-constant
+                   typescript-expression typescript-identifier
+                   typescript-number typescript-pattern
+                   typescript-operator
+                   typescript-property)
                   (vue-bracket css-bracket
-                               typescript-function
-                               typescript-bracket
-                               typescript-delimiter
-                               typescript-custom-function
-                               typescript-custom-variable
-                               typescript-custom-property)))
-
+                   typescript-function
+                   typescript-bracket
+                   typescript-delimiter
+                   typescript-custom-function
+                   typescript-custom-variable
+                   typescript-custom-property)))
     ;; Embedded languages
     (setq-local treesit-range-settings vue-ts-mode--range-settings)
     (setq-local treesit-language-at-point-function
                 #'vue-ts-mode--treesit-language-at-point)
-
     (setq-local treesit-primary-parser (treesit-parser-create 'vue))
-
     (treesit-major-mode-setup)
     (font-lock-add-keywords nil vue-ts-mode--font-lock-keywords 'append)))
 
